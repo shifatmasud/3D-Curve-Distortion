@@ -1,91 +1,115 @@
-import React from 'react';
-import WebGLCanvas from './components/WebGLCanvas';
+import React, { useState } from 'react';
+import BendBox from './components/BendBox';
 
-export type Preset = 'classic' | 'flow' | 'bulge' | 'pinch' | 'inverted';
+type InputMode = 'url' | 'file';
 
 const App: React.FC = () => {
-  const [preset, setPreset] = React.useState<Preset>('classic');
-  const [intensity, setIntensity] = React.useState<number>(0.5);
-  const [scale, setScale] = React.useState<number>(0.8);
+  const [mediaSource, setMediaSource] = useState<string | File>('https://picsum.photos/seed/p1/1920/1080');
+  const [inputMode, setInputMode] = useState<InputMode>('url');
+  const [urlInput, setUrlInput] = useState('https://picsum.photos/seed/p1/1920/1080');
+  
+  // Distortion parameters
+  const [flow, setFlow] = useState<number>(0.05);
+  const [lens, setLens] = useState<number>(0.1);
+  const [pinch, setPinch] = useState<number>(0);
+  const [scale, setScale] = useState<number>(1.0);
 
-  const presets: { id: Preset; name: string }[] = [
-    { id: 'classic', name: 'Classic' },
-    { id: 'flow', name: 'Flow' },
-    { id: 'bulge', name: 'Bulge' },
-    { id: 'pinch', name: 'Pinch' },
-    { id: 'inverted', name: 'Inverted Z' },
-  ];
+  const handleUrlSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (urlInput) {
+      setMediaSource(urlInput);
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setMediaSource(e.target.files[0]);
+    }
+  };
 
   return (
     <div style={styles.appContainer}>
-      <div style={styles.contentWrapper}>
-        <section style={styles.headerSection}>
-          <div style={styles.controlsContainer}>
-            <div style={styles.buttonGroup}>
-              {presets.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => setPreset(p.id)}
-                  style={{
-                    ...styles.button,
-                    ...(preset === p.id ? styles.activeButton : styles.inactiveButton)
-                  }}
-                  aria-pressed={preset === p.id}
-                >
-                  {p.name}
-                </button>
-              ))}
+      <div style={styles.mainLayout}>
+        <div style={styles.controlsPanel}>
+          <h1 style={styles.title}>Bend Box</h1>
+          <p style={styles.description}>
+            An interactive media distortion component. Upload an image, video, or GIF, and manipulate it in real-time.
+          </p>
+
+          <div style={styles.mediaInputSection}>
+            <div style={styles.inputModeToggle}>
+              <button
+                onClick={() => setInputMode('url')}
+                style={inputMode === 'url' ? styles.activeToggle : styles.inactiveToggle}
+                aria-pressed={inputMode === 'url'}
+              >
+                URL
+              </button>
+              <button
+                onClick={() => setInputMode('file')}
+                style={inputMode === 'file' ? styles.activeToggle : styles.inactiveToggle}
+                aria-pressed={inputMode === 'file'}
+              >
+                Upload File
+              </button>
             </div>
-            <div style={styles.slidersWrapper}>
-              <div style={styles.sliderContainer}>
-                <label htmlFor="intensity" style={styles.sliderLabel}>
-                  Intensity
-                </label>
+            {inputMode === 'url' ? (
+              <form onSubmit={handleUrlSubmit} style={styles.urlForm}>
                 <input
-                  id="intensity"
-                  type="range"
-                  min="0"
-                  max="1.5"
-                  step="0.01"
-                  value={intensity}
-                  onChange={(e) => setIntensity(parseFloat(e.target.value))}
-                  style={styles.sliderInput}
-                  aria-label="Distortion Intensity"
+                  type="text"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  placeholder="Enter image/video/gif URL"
+                  style={styles.urlInput}
+                  aria-label="Media URL"
                 />
-              </div>
-              <div style={styles.sliderContainer}>
-                <label htmlFor="scale" style={styles.sliderLabel}>
-                  Image Scale
-                </label>
+                <button type="submit" style={styles.button}>Load</button>
+              </form>
+            ) : (
+              <div style={styles.fileInputContainer}>
                 <input
-                  id="scale"
-                  type="range"
-                  min="0.4"
-                  max="1.0"
-                  step="0.01"
-                  value={scale}
-                  onChange={(e) => setScale(parseFloat(e.target.value))}
-                  style={styles.sliderInput}
-                  aria-label="Image Scale"
+                  type="file"
+                  id="file-upload"
+                  onChange={handleFileChange}
+                  accept="image/*,video/*,.gif"
+                  style={styles.fileInput}
                 />
+                 <label htmlFor="file-upload" style={styles.fileInputLabel}>
+                    Choose File
+                </label>
               </div>
+            )}
+          </div>
+          
+          <div style={styles.slidersWrapper}>
+            <div style={styles.sliderContainer}>
+              <label htmlFor="flow" style={styles.sliderLabel}>Flow Distortion</label>
+              <input id="flow" type="range" min="0" max="0.5" step="0.01" value={flow} onChange={(e) => setFlow(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Flow Distortion"/>
+            </div>
+            <div style={styles.sliderContainer}>
+              <label htmlFor="lens" style={styles.sliderLabel}>Lens Distortion</label>
+              <input id="lens" type="range" min="-1" max="1" step="0.01" value={lens} onChange={(e) => setLens(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Lens Distortion"/>
+            </div>
+            <div style={styles.sliderContainer}>
+              <label htmlFor="pinch" style={styles.sliderLabel}>Pinch / Vortex</label>
+              <input id="pinch" type="range" min="-1.5" max="1.5" step="0.01" value={pinch} onChange={(e) => setPinch(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Pinch Vortex"/>
+            </div>
+            <div style={styles.sliderContainer}>
+              <label htmlFor="scale" style={styles.sliderLabel}>Media Scale</label>
+              <input id="scale" type="range" min="0.5" max="1.5" step="0.01" value={scale} onChange={(e) => setScale(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Media Scale"/>
             </div>
           </div>
-        </section>
-        
-        <section style={styles.imageSection}>
-          <WebGLCanvas imageUrl="https://picsum.photos/seed/p1/1920/1080" preset={preset} intensity={intensity} scale={scale} />
-        </section>
 
-        <section style={styles.imageSection}>
-          <WebGLCanvas imageUrl="https://picsum.photos/seed/p2/1920/1080" preset={preset} intensity={intensity} scale={scale} />
-        </section>
-        
-        <section style={styles.imageSection}>
-          <WebGLCanvas imageUrl="https://picsum.photos/seed/p3/1920/1080" preset={preset} intensity={intensity} scale={scale} />
-        </section>
-
-        <section style={{ height: '50vh' }} />
+        </div>
+        <div style={styles.canvasContainer}>
+          <BendBox 
+            mediaSource={mediaSource} 
+            flow={flow} 
+            lens={lens} 
+            pinch={pinch} 
+            scale={scale} 
+          />
+        </div>
       </div>
     </div>
   );
@@ -93,76 +117,128 @@ const App: React.FC = () => {
 
 const styles: { [key: string]: React.CSSProperties } = {
   appContainer: {
+    minHeight: '100vh',
     backgroundColor: '#F4F4F4',
     color: '#1a1a1a',
-  },
-  contentWrapper: {
-    maxWidth: '56rem',
-    margin: '0 auto',
-    padding: '0 2rem',
-  },
-  headerSection: {
-    padding: '4rem 0',
     display: 'flex',
-    flexDirection: 'column',
     justifyContent: 'center',
     alignItems: 'center',
-    textAlign: 'center',
-    position: 'sticky',
-    top: 0,
-    backgroundColor: 'rgba(244, 244, 244, 0.8)',
-    backdropFilter: 'blur(8px)',
-    zIndex: 10,
+    padding: '2rem',
   },
-  controlsContainer: {
+  mainLayout: {
+    display: 'grid',
+    gridTemplateColumns: '320px 1fr',
+    gap: '2rem',
+    width: '100%',
+    maxWidth: '1200px',
+    minHeight: '70vh',
+    backgroundColor: '#FFFFFF',
+    borderRadius: '16px',
+    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.08)',
+    overflow: 'hidden',
+  },
+  controlsPanel: {
+    padding: '2rem',
     display: 'flex',
     flexDirection: 'column',
-    alignItems: 'center',
-    gap: '1.5rem',
+    gap: '2rem',
+    borderRight: '1px solid #EAEAEA',
+  },
+  title: {
+    fontSize: '1.75rem',
+    fontWeight: 700,
+  },
+  description: {
+    fontSize: '0.9rem',
+    color: '#666666',
+    lineHeight: 1.5,
+  },
+  mediaInputSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1rem',
+  },
+  inputModeToggle: {
+    display: 'flex',
     width: '100%',
+    backgroundColor: '#EEEEEE',
+    borderRadius: '8px',
+    padding: '4px',
+  },
+  activeToggle: {
+    flex: 1,
+    padding: '0.5rem',
+    border: 'none',
+    borderRadius: '6px',
+    backgroundColor: '#FFFFFF',
+    color: '#1a1a1a',
+    fontWeight: 500,
+    cursor: 'pointer',
+    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+    transition: 'all 0.2s ease',
+  },
+  inactiveToggle: {
+    flex: 1,
+    padding: '0.5rem',
+    border: 'none',
+    borderRadius: '6px',
+    backgroundColor: 'transparent',
+    color: '#666666',
+    fontWeight: 500,
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+  },
+  urlForm: {
+    display: 'flex',
+    gap: '0.5rem',
+  },
+  urlInput: {
+    flex: 1,
+    padding: '0.5rem 0.75rem',
+    border: '1px solid #DDDDDD',
+    borderRadius: '6px',
+    fontSize: '0.875rem',
+    outline: 'none',
+  },
+  fileInputContainer: {
+    position: 'relative',
+  },
+  fileInput: {
+    display: 'none',
+  },
+  fileInputLabel: {
+    display: 'block',
+    padding: '0.5rem 1rem',
+    backgroundColor: '#1a1a1a',
+    color: '#FFFFFF',
+    borderRadius: '6px',
+    textAlign: 'center',
+    cursor: 'pointer',
+    transition: 'background-color 0.2s ease',
+  },
+  button: {
+    padding: '0.5rem 1rem',
+    border: 'none',
+    borderRadius: '6px',
+    backgroundColor: '#1a1a1a',
+    color: '#FFFFFF',
+    fontWeight: 500,
+    cursor: 'pointer',
+    transition: 'background-color 0.2s ease',
   },
   slidersWrapper: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '1rem',
-    width: '100%',
-    maxWidth: '16rem',
-  },
-  buttonGroup: {
-    display: 'flex',
-    justifyContent: 'center',
-    flexWrap: 'wrap',
-    gap: '0.5rem',
-  },
-  button: {
-    padding: '0.5rem 1rem',
-    borderRadius: '6px',
-    fontSize: '0.875rem',
-    fontWeight: 500,
-    transition: 'all 0.2s ease-in-out',
-    border: '1px solid transparent',
-    cursor: 'pointer',
-    outline: 'none',
-  },
-  activeButton: {
-    backgroundColor: '#1a1a1a',
-    color: '#FFFFFF',
-    boxShadow: '0 4px 14px 0 rgba(0, 0, 0, 0.1)',
-  },
-  inactiveButton: {
-    backgroundColor: 'transparent',
-    color: '#666666',
-    border: '1px solid #DDDDDD',
+    gap: '1.5rem',
   },
   sliderContainer: {
     width: '100%',
   },
   sliderLabel: {
     display: 'block',
-    textAlign: 'center',
     fontSize: '0.875rem',
     fontWeight: 500,
-    color: '#666666',
+    color: '#333333',
     marginBottom: '0.75rem',
   },
   sliderInput: {
@@ -174,8 +250,14 @@ const styles: { [key: string]: React.CSSProperties } = {
     cursor: 'pointer',
     outline: 'none',
   },
-  imageSection: {
-    padding: '6rem 0',
+  canvasContainer: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: '100%',
+    height: '100%',
+    minHeight: '400px',
+    background: 'radial-gradient(circle, #E8E8E8 0%, #D8D8D8 100%)'
   },
 };
 
