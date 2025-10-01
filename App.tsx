@@ -74,15 +74,15 @@ const App: React.FC = () => {
         </section>
         
         <section style={styles.imageSection}>
-          <WebGLCanvas imageUrl="https://picsum.photos/id/10/1920/1080" preset={preset} intensity={intensity} scale={scale} />
+          <WebGLCanvas imageUrl="https://picsum.photos/seed/p1/1920/1080" preset={preset} intensity={intensity} scale={scale} />
         </section>
 
         <section style={styles.imageSection}>
-          <WebGLCanvas imageUrl="https://picsum.photos/id/20/1920/1080" preset={preset} intensity={intensity} scale={scale} />
+          <WebGLCanvas imageUrl="https://picsum.photos/seed/p2/1920/1080" preset={preset} intensity={intensity} scale={scale} />
         </section>
         
         <section style={styles.imageSection}>
-          <WebGLCanvas imageUrl="https://picsum.photos/id/30/1920/1080" preset={preset} intensity={intensity} scale={scale} />
+          <WebGLCanvas imageUrl="https://picsum.photos/seed/p3/1920/1080" preset={preset} intensity={intensity} scale={scale} />
         </section>
 
         <section style={{ height: '50vh' }} />
