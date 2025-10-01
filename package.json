@@ -1,5 +1,5 @@
 {
-  "name": "webgl-image-distortion",
+  "name": "blend-box:-webgl-media-distortion",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,7 +11,7 @@
   "dependencies": {
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "three": "0.128.0",
+    "three": "0.180.0",
     "framer": "^2.4.1"
   },
   "devDependencies": {

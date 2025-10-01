@@ -7,6 +7,8 @@ export interface BendBoxProps {
   lens: number;
   pinch: number;
   scale: number;
+  // FIX: Added missing motionSpeed property to align with BendBoxEngine's expected props.
+  motionSpeed: number;
 }
 
 const BendBox: React.FC<BendBoxProps> = (props) => {
@@ -30,7 +32,8 @@ const BendBox: React.FC<BendBoxProps> = (props) => {
     if (engineRef.current) {
       engineRef.current.setProps(props);
     }
-  }, [props.mediaSource, props.flow, props.lens, props.pinch, props.scale]);
+    // FIX: Added props.motionSpeed to the dependency array to ensure prop changes are detected.
+  }, [props.mediaSource, props.flow, props.lens, props.pinch, props.scale, props.motionSpeed]);
 
 
   return <div ref={mountRef} style={{ width: '100%', height: '100%' }} />;

@@ -68,16 +68,34 @@ const fragmentShader = `
   uniform float uPlaneAspect;
   varying vec2 vUv;
 
+  // Note: <colorspace_pars_fragment> is not needed here because Three.js
+  // automatically includes it when renderer.outputColorSpace is set to SRGBColorSpace.
+  // Including it manually would cause a redefinition error.
+
   void main() {
-    vec2 ratio = vec2(
-      min((uPlaneAspect / uImageAspect), 1.0),
-      min((uImageAspect / uPlaneAspect), 1.0)
-    );
-    vec2 correctedUv = vec2(
-      vUv.x * ratio.x + (1.0 - ratio.x) * 0.5,
-      vUv.y * ratio.y + (1.0 - ratio.y) * 0.5
-    );
-    gl_FragColor = texture2D(uTexture, correctedUv);
+    float R = uPlaneAspect / uImageAspect;
+    // This calculation ensures the image covers the plane, preserving aspect ratio.
+    vec2 scale = R > 1. ? vec2(1.0/R, 1.0) : vec2(1.0, R);
+    
+    // Recalculate UVs to center and scale the texture.
+    vec2 correctedUv = (vUv - 0.5) / scale + 0.5;
+    
+    // If the corrected UVs are outside the [0,1] range, it means we are
+    // in the transparent area, so we discard the pixel.
+    if (correctedUv.x < 0.0 || correctedUv.x > 1.0 || correctedUv.y < 0.0 || correctedUv.y > 1.0) {
+      discard;
+    }
+
+    // Sample the texture. The color is automatically converted from sRGB to linear space
+    // by the GPU thanks to the sRGB texture encoding setup by Three.js.
+    vec4 texColor = texture2D(uTexture, correctedUv);
+    
+    // Assign the linear color to gl_FragColor.
+    gl_FragColor = texColor;
+
+    // The colorspace_fragment chunk correctly converts the linear color
+    // to the renderer's output color space (sRGB), ensuring correct color display.
+    #include <colorspace_fragment>
   }
 `;
 
@@ -99,6 +117,10 @@ export class BendBoxEngine {
   private currentMediaSource?: string | File;
   private videoElement?: HTMLVideoElement;
   private currentObjectUrl?: string;
+  
+  // Props for smooth animation
+  private targetProps: { flow: number; lens: number; pinch: number; scale: number; motionSpeed: number; };
+  private animatedProps: { flow: number; lens: number; pinch: number; scale: number; };
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -110,9 +132,13 @@ export class BendBoxEngine {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
 
     this.clock = new THREE.Clock();
+    
+    this.targetProps = { flow: 0, lens: 0, pinch: 0, scale: 1.0, motionSpeed: 0.075 };
+    this.animatedProps = { flow: 0, lens: 0, pinch: 0, scale: 1.0 };
     
     this.geometry = new THREE.PlaneGeometry(2, 2, 64, 64);
     this.material = new THREE.ShaderMaterial({
@@ -143,7 +169,18 @@ export class BendBoxEngine {
   }
 
   private animate = () => {
+    const lerpFactor = this.targetProps.motionSpeed;
+    this.animatedProps.flow = THREE.MathUtils.lerp(this.animatedProps.flow, this.targetProps.flow, lerpFactor);
+    this.animatedProps.lens = THREE.MathUtils.lerp(this.animatedProps.lens, this.targetProps.lens, lerpFactor);
+    this.animatedProps.pinch = THREE.MathUtils.lerp(this.animatedProps.pinch, this.targetProps.pinch, lerpFactor);
+    this.animatedProps.scale = THREE.MathUtils.lerp(this.animatedProps.scale, this.targetProps.scale, lerpFactor);
+    
     this.material.uniforms.uTime.value = this.clock.getElapsedTime();
+    this.material.uniforms.uFlow.value = this.animatedProps.flow;
+    this.material.uniforms.uLens.value = this.animatedProps.lens;
+    this.material.uniforms.uPinch.value = this.animatedProps.pinch;
+    this.material.uniforms.uScale.value = this.animatedProps.scale;
+
     this.renderer.render(this.scene, this.camera);
     this.animationFrameId = requestAnimationFrame(this.animate);
   }
@@ -204,6 +241,7 @@ export class BendBoxEngine {
         this.videoElement.playsInline = true;
         this.videoElement.play().then(() => {
             const videoTexture = new THREE.VideoTexture(this.videoElement!);
+            videoTexture.colorSpace = THREE.SRGBColorSpace;
             this.material.uniforms.uTexture.value = videoTexture;
             this.material.uniforms.uImageAspect.value = this.videoElement!.videoWidth / this.videoElement!.videoHeight;
         }).catch(err => console.error("Video play failed:", err));
@@ -211,6 +249,7 @@ export class BendBoxEngine {
         const textureLoader = new THREE.TextureLoader();
         textureLoader.setCrossOrigin('anonymous');
         textureLoader.load(sourceUrl, (texture) => {
+            texture.colorSpace = THREE.SRGBColorSpace;
             this.material.uniforms.uTexture.value = texture;
             this.material.uniforms.uImageAspect.value = texture.image.width / texture.image.height;
         });
@@ -221,10 +260,11 @@ export class BendBoxEngine {
     if (this.currentMediaSource !== props.mediaSource) {
         this.loadMedia(props.mediaSource);
     }
-    this.material.uniforms.uFlow.value = props.flow;
-    this.material.uniforms.uLens.value = props.lens;
-    this.material.uniforms.uPinch.value = props.pinch;
-    this.material.uniforms.uScale.value = props.scale;
+    this.targetProps.flow = props.flow;
+    this.targetProps.lens = props.lens;
+    this.targetProps.pinch = props.pinch;
+    this.targetProps.scale = props.scale;
+    this.targetProps.motionSpeed = props.motionSpeed;
   }
 
   public dispose() {

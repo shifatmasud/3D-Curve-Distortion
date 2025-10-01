@@ -9,6 +9,7 @@ interface BendBoxProps {
   lens: number;
   pinch: number;
   scale: number;
+  motionSpeed: number;
 }
 
 // --- SHADERS AND ENGINE LOGIC (FROM BendBoxEngine.ts) ---
@@ -80,16 +81,28 @@ const fragmentShader = `
   uniform float uPlaneAspect;
   varying vec2 vUv;
 
+  // Note: <colorspace_pars_fragment> is not needed here because Three.js
+  // automatically includes it when renderer.outputColorSpace is set to SRGBColorSpace.
+  // Including it manually would cause a redefinition error.
+
   void main() {
-    vec2 ratio = vec2(
-      min((uPlaneAspect / uImageAspect), 1.0),
-      min((uImageAspect / uPlaneAspect), 1.0)
-    );
-    vec2 correctedUv = vec2(
-      vUv.x * ratio.x + (1.0 - ratio.x) * 0.5,
-      vUv.y * ratio.y + (1.0 - ratio.y) * 0.5
-    );
-    gl_FragColor = texture2D(uTexture, correctedUv);
+    float R = uPlaneAspect / uImageAspect;
+    vec2 scale = R > 1. ? vec2(1.0/R, 1.0) : vec2(1.0, R);
+    
+    vec2 correctedUv = (vUv - 0.5) / scale + 0.5;
+    
+    if (correctedUv.x < 0.0 || correctedUv.x > 1.0 || correctedUv.y < 0.0 || correctedUv.y > 1.0) {
+      discard;
+    }
+
+    // The GPU automatically decodes the sRGB texture to linear space.
+    vec4 texColor = texture2D(uTexture, correctedUv);
+    
+    // Assign the linear color to gl_FragColor.
+    gl_FragColor = texColor;
+
+    // This converts the linear color in gl_FragColor to the output sRGB color space.
+    #include <colorspace_fragment>
   }
 `;
 
@@ -113,6 +126,10 @@ class BendBoxEngine {
   private currentObjectUrl?: string;
   private loadMediaRequestId = 0;
 
+  // Props for smooth animation
+  private targetProps: { flow: number; lens: number; pinch: number; scale: number; motionSpeed: number; };
+  private animatedProps: { flow: number; lens: number; pinch: number; scale: number; };
+
   constructor(container: HTMLDivElement) {
     this.container = container;
     
@@ -123,10 +140,14 @@ class BendBoxEngine {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
 
     this.clock = new THREE.Clock();
     
+    this.targetProps = { flow: 0, lens: 0, pinch: 0, scale: 1.0, motionSpeed: 0.075 };
+    this.animatedProps = { flow: 0, lens: 0, pinch: 0, scale: 1.0 };
+
     this.geometry = new THREE.PlaneGeometry(2, 2, 64, 64);
     this.material = new THREE.ShaderMaterial({
       uniforms: {
@@ -157,7 +178,21 @@ class BendBoxEngine {
 
   private animate = () => {
     if(this.isDisposed) return;
+    
+    // Smoothly interpolate animated props towards target props
+    const lerpFactor = this.targetProps.motionSpeed;
+    this.animatedProps.flow = THREE.MathUtils.lerp(this.animatedProps.flow, this.targetProps.flow, lerpFactor);
+    this.animatedProps.lens = THREE.MathUtils.lerp(this.animatedProps.lens, this.targetProps.lens, lerpFactor);
+    this.animatedProps.pinch = THREE.MathUtils.lerp(this.animatedProps.pinch, this.targetProps.pinch, lerpFactor);
+    this.animatedProps.scale = THREE.MathUtils.lerp(this.animatedProps.scale, this.targetProps.scale, lerpFactor);
+
+    // Update uniforms with the smoothed values
     this.material.uniforms.uTime.value = this.clock.getElapsedTime();
+    this.material.uniforms.uFlow.value = this.animatedProps.flow;
+    this.material.uniforms.uLens.value = this.animatedProps.lens;
+    this.material.uniforms.uPinch.value = this.animatedProps.pinch;
+    this.material.uniforms.uScale.value = this.animatedProps.scale;
+
     this.renderer.render(this.scene, this.camera);
     this.animationFrameId = requestAnimationFrame(this.animate);
   }
@@ -214,15 +249,8 @@ class BendBoxEngine {
             return;
         }
 
-        const resizedResult = this._resizeTextureOnGPU(result.texture, result.resolution);
-        
-        if (this.isDisposed || currentRequestId !== this.loadMediaRequestId) {
-            resizedResult.texture.dispose();
-            return;
-        }
-
-        this.material.uniforms.uTexture.value = resizedResult.texture;
-        this.material.uniforms.uImageAspect.value = resizedResult.resolution.x / resizedResult.resolution.y;
+        this.material.uniforms.uTexture.value = result.texture;
+        this.material.uniforms.uImageAspect.value = result.resolution.x / result.resolution.y;
 
     } catch (error) {
         console.error("BendBoxEngine: Failed to load media", error);
@@ -249,81 +277,6 @@ class BendBoxEngine {
     }
   }
   
-  private _resizeTextureOnGPU(sourceTexture: THREE.Texture, sourceResolution: THREE.Vector2): { texture: THREE.Texture, resolution: THREE.Vector2 } {
-    const canvasSize = new THREE.Vector2();
-    this.renderer.getSize(canvasSize);
-    const pixelRatio = this.renderer.getPixelRatio();
-    
-    if (canvasSize.x === 0) return { texture: sourceTexture, resolution: sourceResolution };
-    
-    const targetSize = canvasSize.multiplyScalar(pixelRatio);
-
-    if (sourceResolution.x <= targetSize.x && sourceResolution.y <= targetSize.y) {
-        return { texture: sourceTexture, resolution: sourceResolution };
-    }
-
-    const canvasAspect = targetSize.x / targetSize.y;
-    const sourceAspect = sourceResolution.x / sourceResolution.y;
-
-    let scale = (canvasAspect > sourceAspect) ? 
-                (targetSize.x / sourceResolution.x) : 
-                (targetSize.y / sourceResolution.y);
-    scale = Math.min(scale, 1.0);
-
-    if (scale >= 0.99) {
-        return { texture: sourceTexture, resolution: sourceResolution };
-    }
-
-    const newWidth = Math.max(1, Math.round(sourceResolution.x * scale));
-    const newHeight = Math.max(1, Math.round(sourceResolution.y * scale));
-
-    const resizeTarget = new THREE.WebGLRenderTarget(newWidth, newHeight, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        format: THREE.RGBAFormat,
-        type: sourceTexture.type,
-    });
-
-    const tempScene = new THREE.Scene();
-    const tempMaterial = new THREE.ShaderMaterial({
-        vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
-        fragmentShader: `uniform sampler2D uTexture; varying vec2 vUv; void main() { gl_FragColor = texture2D(uTexture, vUv); }`,
-        uniforms: { uTexture: { value: sourceTexture } }
-    });
-    tempScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), tempMaterial));
-
-    const oldRenderTarget = this.renderer.getRenderTarget();
-    // FIX: In newer THREE.js versions, `outputEncoding` is replaced by `outputColorSpace`.
-    const oldOutputColorSpace = this.renderer.outputColorSpace;
-
-    this.renderer.setRenderTarget(resizeTarget);
-    // FIX: In newer THREE.js versions, `texture.encoding` is replaced by `texture.colorSpace` and `THREE.sRGBEncoding` by `THREE.SRGBColorSpace`.
-    if(sourceTexture.colorSpace === THREE.SRGBColorSpace){
-        // FIX: In newer THREE.js versions, `outputEncoding` is replaced by `outputColorSpace` and `THREE.sRGBEncoding` by `THREE.SRGBColorSpace`.
-        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    }
-    
-    this.renderer.render(tempScene, this.camera);
-
-    this.renderer.setRenderTarget(oldRenderTarget);
-    // FIX: In newer THREE.js versions, `outputEncoding` is replaced by `outputColorSpace`.
-    this.renderer.outputColorSpace = oldOutputColorSpace;
-
-    sourceTexture.dispose();
-    tempMaterial.dispose();
-    // FIX: Cast scene child to THREE.Mesh to access geometry property.
-    (tempScene.children[0] as THREE.Mesh).geometry.dispose();
-
-    const newTexture = resizeTarget.texture;
-    // FIX: In newer THREE.js versions, `texture.encoding` is replaced by `texture.colorSpace`.
-    newTexture.colorSpace = sourceTexture.colorSpace;
-    
-    return {
-        texture: newTexture,
-        resolution: new THREE.Vector2(newWidth, newHeight)
-    };
-  }
-
   private async _loadImageTexture(url: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
       const loader = new THREE.TextureLoader();
       loader.setCrossOrigin("Anonymous");
@@ -335,6 +288,7 @@ class BendBoxEngine {
           throw new Error('Component unmounted during texture load');
       }
       const image = texture.image as HTMLImageElement;
+      texture.colorSpace = THREE.SRGBColorSpace;
       return { 
           texture, 
           resolution: new THREE.Vector2(image.width, image.height)
@@ -350,8 +304,10 @@ class BendBoxEngine {
               video.play().then(() => {
                   if (this.isDisposed) return reject(new Error('Component unmounted'));
                   cleanup();
+                  const videoTexture = new THREE.VideoTexture(video);
+                  videoTexture.colorSpace = THREE.SRGBColorSpace;
                   resolve({ 
-                      texture: new THREE.VideoTexture(video), 
+                      texture: videoTexture, 
                       resolution: new THREE.Vector2(video.videoWidth, video.videoHeight)
                   });
               }).catch(e => {
@@ -383,10 +339,11 @@ class BendBoxEngine {
     if (this.currentMediaSource !== props.mediaSource) {
         this.loadMedia(props.mediaSource);
     }
-    this.material.uniforms.uFlow.value = props.flow;
-    this.material.uniforms.uLens.value = props.lens;
-    this.material.uniforms.uPinch.value = props.pinch;
-    this.material.uniforms.uScale.value = props.scale;
+    this.targetProps.flow = props.flow;
+    this.targetProps.lens = props.lens;
+    this.targetProps.pinch = props.pinch;
+    this.targetProps.scale = props.scale;
+    this.targetProps.motionSpeed = props.motionSpeed;
   }
 
   public dispose() {
@@ -426,7 +383,7 @@ const BendBox: React.FC<BendBoxProps> = (props) => {
     if (engineRef.current) {
       engineRef.current.setProps(props);
     }
-  }, [props.mediaSource, props.flow, props.lens, props.pinch, props.scale]);
+  }, [props.mediaSource, props.flow, props.lens, props.pinch, props.scale, props.motionSpeed]);
 
   return <div ref={mountRef} style={{ width: '100%', height: '100%' }} />;
 };
@@ -434,19 +391,24 @@ const BendBox: React.FC<BendBoxProps> = (props) => {
 
 // --- FRAMER CODE COMPONENT ---
 
+/**
+ * @framerSupportedLayoutWidth any
+ * @framerSupportedLayoutHeight any
+ */
 export default function Bend(props) {
-  const { sourceType, mediaUrl, mediaFile, flow, lens, pinch, scale } = props;
+  const { sourceType, mediaUrl, mediaFile, flow, lens, pinch, scale, motionSpeed } = props;
   
   const mediaSource = sourceType === 'file' && mediaFile ? mediaFile : mediaUrl;
 
   return (
-    <div style={{ width: '100%', height: '100%', background: 'radial-gradient(circle, #E8E8E8 0%, #D8D8D8 100%)' }}>
+    <div style={{ width: '100%', height: '100%' }}>
         <BendBox 
             mediaSource={mediaSource} 
             flow={flow} 
             lens={lens} 
             pinch={pinch} 
             scale={scale} 
+            motionSpeed={motionSpeed} 
         />
     </div>
   );
@@ -461,6 +423,7 @@ Bend.defaultProps = {
     lens: 0.1,
     pinch: 0,
     scale: 1.0,
+    motionSpeed: 0.075,
 };
 
 addPropertyControls(Bend, {
@@ -488,7 +451,6 @@ addPropertyControls(Bend, {
         min: 0,
         max: 0.5,
         step: 0.01,
-        displayStepper: true,
     },
     lens: {
         type: ControlType.Number,
@@ -496,7 +458,6 @@ addPropertyControls(Bend, {
         min: -1,
         max: 1,
         step: 0.01,
-        displayStepper: true,
     },
     pinch: {
         type: ControlType.Number,
@@ -504,7 +465,6 @@ addPropertyControls(Bend, {
         min: -1.5,
         max: 1.5,
         step: 0.01,
-        displayStepper: true,
     },
     scale: {
         type: ControlType.Number,
@@ -512,6 +472,12 @@ addPropertyControls(Bend, {
         min: 0.5,
         max: 1.5,
         step: 0.01,
-        displayStepper: true,
+    },
+    motionSpeed: {
+        type: ControlType.Number,
+        title: "Motion Speed",
+        min: 0.01,
+        max: 0.3,
+        step: 0.005,
     },
 });

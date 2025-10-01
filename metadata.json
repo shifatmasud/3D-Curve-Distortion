@@ -1,5 +1,5 @@
 {
-  "name": "WebGL Image Distortion",
+  "name": "Blend Box: WebGL Media Distortion",
   "description": "A React application that demonstrates a scroll-based curve distortion effect on an image using Three.js and WebGL shaders.",
   "requestFramePermissions": []
 }

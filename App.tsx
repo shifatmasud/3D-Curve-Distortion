@@ -13,6 +13,8 @@ const App: React.FC = () => {
   const [lens, setLens] = useState<number>(0.1);
   const [pinch, setPinch] = useState<number>(0);
   const [scale, setScale] = useState<number>(1.0);
+  const [motionSpeed, setMotionSpeed] = useState<number>(0.075);
+
 
   const handleUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -98,6 +100,10 @@ const App: React.FC = () => {
               <label htmlFor="scale" style={styles.sliderLabel}>Media Scale</label>
               <input id="scale" type="range" min="0.5" max="1.5" step="0.01" value={scale} onChange={(e) => setScale(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Media Scale"/>
             </div>
+            <div style={styles.sliderContainer}>
+                <label htmlFor="motionSpeed" style={styles.sliderLabel}>Motion Speed</label>
+                <input id="motionSpeed" type="range" min="0.01" max="0.3" step="0.005" value={motionSpeed} onChange={(e) => setMotionSpeed(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Motion Speed"/>
+            </div>
           </div>
 
         </div>
@@ -108,6 +114,7 @@ const App: React.FC = () => {
             lens={lens} 
             pinch={pinch} 
             scale={scale} 
+            motionSpeed={motionSpeed}
           />
         </div>
       </div>
