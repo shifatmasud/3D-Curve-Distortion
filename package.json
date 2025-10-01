@@ -1,5 +1,5 @@
 {
-  "name": "webgl-scroll-image-distortion",
+  "name": "webgl-image-distortion",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "three": "0.128.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

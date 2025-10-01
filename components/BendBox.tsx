@@ -1,7 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-
-// Since we are loading Three.js from a CDN, we need to declare it to TypeScript
-declare const THREE: any;
+import * as THREE from 'three';
 
 interface BendBoxProps {
   mediaSource: string | File;
@@ -111,7 +109,7 @@ const BendBox: React.FC<BendBoxProps> = ({ mediaSource, flow, lens, pinch, scale
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
-    if (!mountRef.current || typeof THREE === 'undefined') return;
+    if (!mountRef.current) return;
     const mount = mountRef.current;
 
     const scene = new THREE.Scene();
@@ -139,6 +137,7 @@ const BendBox: React.FC<BendBoxProps> = ({ mediaSource, flow, lens, pinch, scale
       },
       vertexShader,
       fragmentShader,
+      transparent: true,
     });
 
     const mesh = new THREE.Mesh(geometry, material);
