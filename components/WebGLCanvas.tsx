@@ -167,6 +167,7 @@ const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ imageUrl, preset, intensity, 
     const clock = new THREE.Clock();
 
     const textureLoader = new THREE.TextureLoader();
+    textureLoader.setCrossOrigin('anonymous'); // Fix for CORS issue
     let material: any = null;
     const texture = textureLoader.load(imageUrl, (tex: any) => {
         if (material) material.uniforms.uImageAspect.value = tex.image.width / tex.image.height;
