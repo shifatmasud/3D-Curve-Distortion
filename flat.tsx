@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useRef, useEffect } from 'react';
 import * as THREE from 'three';
+import { addPropertyControls, ControlType } from "framer";
 
 // --- BEND BOX PROPS INTERFACE ---
 interface BendBoxProps {
@@ -110,6 +111,7 @@ class BendBoxEngine {
   private currentMediaSource?: string | File;
   private videoElement?: HTMLVideoElement;
   private currentObjectUrl?: string;
+  private loadMediaRequestId = 0;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -179,19 +181,17 @@ class BendBoxEngine {
     this.material.uniforms.uPlaneAspect.value = width / height;
   };
 
-  private loadMedia(mediaSource: string | File) {
-    this.material.uniforms.uTexture.value?.dispose();
-    if (this.videoElement) {
-        this.videoElement.pause();
-        this.videoElement.src = "";
-        this.videoElement = undefined;
-    }
-    if (this.currentObjectUrl) {
-        URL.revokeObjectURL(this.currentObjectUrl);
-        this.currentObjectUrl = undefined;
-    }
-
+  private async loadMedia(mediaSource: string | File) {
+    this.loadMediaRequestId++;
+    const currentRequestId = this.loadMediaRequestId;
     this.currentMediaSource = mediaSource;
+
+    this._cleanupPreviousMedia();
+
+    if (!mediaSource) {
+        this.material.uniforms.uTexture.value = null;
+        return;
+    }
 
     const sourceUrl = mediaSource instanceof File ? URL.createObjectURL(mediaSource) : mediaSource;
     if (mediaSource instanceof File) {
@@ -199,28 +199,184 @@ class BendBoxEngine {
     }
     
     const isVideoSource = mediaSource instanceof File ? mediaSource.type.startsWith('video/') : isVideo(sourceUrl);
-    
-    if (isVideoSource) {
-        this.videoElement = document.createElement('video');
-        this.videoElement.crossOrigin = 'anonymous';
-        this.videoElement.src = sourceUrl;
-        this.videoElement.muted = true;
-        this.videoElement.loop = true;
-        this.videoElement.autoplay = true;
-        this.videoElement.playsInline = true;
-        this.videoElement.play().then(() => {
-            const videoTexture = new THREE.VideoTexture(this.videoElement!);
-            this.material.uniforms.uTexture.value = videoTexture;
-            this.material.uniforms.uImageAspect.value = this.videoElement!.videoWidth / this.videoElement!.videoHeight;
-        }).catch(err => console.error("Video play failed:", err));
-    } else {
-        const textureLoader = new THREE.TextureLoader();
-        textureLoader.setCrossOrigin('anonymous');
-        textureLoader.load(sourceUrl, (texture) => {
-            this.material.uniforms.uTexture.value = texture;
-            this.material.uniforms.uImageAspect.value = texture.image.width / texture.image.height;
-        });
+
+    try {
+        let result: { texture: THREE.Texture, resolution: THREE.Vector2 };
+
+        if (isVideoSource) {
+            result = await this._loadVideoTexture(sourceUrl);
+        } else {
+            result = await this._loadImageTexture(sourceUrl);
+        }
+
+        if (this.isDisposed || currentRequestId !== this.loadMediaRequestId) {
+            result.texture.dispose();
+            return;
+        }
+
+        const resizedResult = this._resizeTextureOnGPU(result.texture, result.resolution);
+        
+        if (this.isDisposed || currentRequestId !== this.loadMediaRequestId) {
+            resizedResult.texture.dispose();
+            return;
+        }
+
+        this.material.uniforms.uTexture.value = resizedResult.texture;
+        this.material.uniforms.uImageAspect.value = resizedResult.resolution.x / resizedResult.resolution.y;
+
+    } catch (error) {
+        console.error("BendBoxEngine: Failed to load media", error);
+        if (this.currentObjectUrl) {
+            URL.revokeObjectURL(this.currentObjectUrl);
+            this.currentObjectUrl = undefined;
+        }
     }
+  }
+
+  private _cleanupPreviousMedia() {
+    this.material.uniforms.uTexture.value?.dispose();
+    this.material.uniforms.uTexture.value = null;
+
+    if (this.videoElement) {
+        this.videoElement.pause();
+        this.videoElement.removeAttribute('src');
+        this.videoElement.load();
+        this.videoElement = undefined;
+    }
+    if (this.currentObjectUrl) {
+        URL.revokeObjectURL(this.currentObjectUrl);
+        this.currentObjectUrl = undefined;
+    }
+  }
+  
+  private _resizeTextureOnGPU(sourceTexture: THREE.Texture, sourceResolution: THREE.Vector2): { texture: THREE.Texture, resolution: THREE.Vector2 } {
+    const canvasSize = new THREE.Vector2();
+    this.renderer.getSize(canvasSize);
+    const pixelRatio = this.renderer.getPixelRatio();
+    
+    if (canvasSize.x === 0) return { texture: sourceTexture, resolution: sourceResolution };
+    
+    const targetSize = canvasSize.multiplyScalar(pixelRatio);
+
+    if (sourceResolution.x <= targetSize.x && sourceResolution.y <= targetSize.y) {
+        return { texture: sourceTexture, resolution: sourceResolution };
+    }
+
+    const canvasAspect = targetSize.x / targetSize.y;
+    const sourceAspect = sourceResolution.x / sourceResolution.y;
+
+    let scale = (canvasAspect > sourceAspect) ? 
+                (targetSize.x / sourceResolution.x) : 
+                (targetSize.y / sourceResolution.y);
+    scale = Math.min(scale, 1.0);
+
+    if (scale >= 0.99) {
+        return { texture: sourceTexture, resolution: sourceResolution };
+    }
+
+    const newWidth = Math.max(1, Math.round(sourceResolution.x * scale));
+    const newHeight = Math.max(1, Math.round(sourceResolution.y * scale));
+
+    const resizeTarget = new THREE.WebGLRenderTarget(newWidth, newHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: sourceTexture.type,
+    });
+
+    const tempScene = new THREE.Scene();
+    const tempMaterial = new THREE.ShaderMaterial({
+        vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
+        fragmentShader: `uniform sampler2D uTexture; varying vec2 vUv; void main() { gl_FragColor = texture2D(uTexture, vUv); }`,
+        uniforms: { uTexture: { value: sourceTexture } }
+    });
+    tempScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), tempMaterial));
+
+    const oldRenderTarget = this.renderer.getRenderTarget();
+    // FIX: In newer THREE.js versions, `outputEncoding` is replaced by `outputColorSpace`.
+    const oldOutputColorSpace = this.renderer.outputColorSpace;
+
+    this.renderer.setRenderTarget(resizeTarget);
+    // FIX: In newer THREE.js versions, `texture.encoding` is replaced by `texture.colorSpace` and `THREE.sRGBEncoding` by `THREE.SRGBColorSpace`.
+    if(sourceTexture.colorSpace === THREE.SRGBColorSpace){
+        // FIX: In newer THREE.js versions, `outputEncoding` is replaced by `outputColorSpace` and `THREE.sRGBEncoding` by `THREE.SRGBColorSpace`.
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    }
+    
+    this.renderer.render(tempScene, this.camera);
+
+    this.renderer.setRenderTarget(oldRenderTarget);
+    // FIX: In newer THREE.js versions, `outputEncoding` is replaced by `outputColorSpace`.
+    this.renderer.outputColorSpace = oldOutputColorSpace;
+
+    sourceTexture.dispose();
+    tempMaterial.dispose();
+    // FIX: Cast scene child to THREE.Mesh to access geometry property.
+    (tempScene.children[0] as THREE.Mesh).geometry.dispose();
+
+    const newTexture = resizeTarget.texture;
+    // FIX: In newer THREE.js versions, `texture.encoding` is replaced by `texture.colorSpace`.
+    newTexture.colorSpace = sourceTexture.colorSpace;
+    
+    return {
+        texture: newTexture,
+        resolution: new THREE.Vector2(newWidth, newHeight)
+    };
+  }
+
+  private async _loadImageTexture(url: string): Promise<{ texture: THREE.Texture, resolution: THREE.Vector2 }> {
+      const loader = new THREE.TextureLoader();
+      loader.setCrossOrigin("Anonymous");
+      const texture = await loader.loadAsync(url).catch(() => {
+           throw new Error(`Failed to load image. Check CORS policy or URL: ${url}`);
+      });
+      if (this.isDisposed) {
+          texture.dispose();
+          throw new Error('Component unmounted during texture load');
+      }
+      const image = texture.image as HTMLImageElement;
+      return { 
+          texture, 
+          resolution: new THREE.Vector2(image.width, image.height)
+      };
+  }
+
+  private _loadVideoTexture(url: string): Promise<{ texture: THREE.VideoTexture, resolution: THREE.Vector2 }> {
+      return new Promise((resolve, reject) => {
+          const video = document.createElement('video');
+          this.videoElement = video;
+
+          const onCanPlay = () => {
+              video.play().then(() => {
+                  if (this.isDisposed) return reject(new Error('Component unmounted'));
+                  cleanup();
+                  resolve({ 
+                      texture: new THREE.VideoTexture(video), 
+                      resolution: new THREE.Vector2(video.videoWidth, video.videoHeight)
+                  });
+              }).catch(e => {
+                  cleanup();
+                  reject(e);
+              });
+          };
+          const onError = () => {
+              cleanup();
+              reject(new Error(`Failed to load video. Check CORS policy or URL: ${url}`));
+          };
+          const cleanup = () => {
+              video.removeEventListener('canplay', onCanPlay);
+              video.removeEventListener('error', onError);
+          };
+
+          video.addEventListener('canplay', onCanPlay);
+          video.addEventListener('error', onError);
+          video.crossOrigin = "Anonymous";
+          video.src = url;
+          video.muted = true;
+          video.loop = true;
+          video.playsInline = true;
+          video.load();
+      });
   }
   
   public setProps(props: BendBoxProps) {
@@ -240,23 +396,16 @@ class BendBoxEngine {
     cancelAnimationFrame(this.animationFrameId);
     this.resizeObserver.disconnect();
     
+    this._cleanupPreviousMedia();
+    
     this.renderer.domElement.remove();
     this.renderer.dispose();
     this.geometry.dispose();
-    this.material.uniforms.uTexture.value?.dispose();
     this.material.dispose();
-    
-    if (this.videoElement) {
-        this.videoElement.pause();
-        this.videoElement.src = "";
-    }
-     if (this.currentObjectUrl) {
-        URL.revokeObjectURL(this.currentObjectUrl);
-    }
   }
 }
 
-// --- BEND BOX REACT COMPONENT (FROM BendBox.tsx) ---
+// --- BEND BOX REACT COMPONENT (THE WRAPPER) ---
 
 const BendBox: React.FC<BendBoxProps> = (props) => {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -283,323 +432,86 @@ const BendBox: React.FC<BendBoxProps> = (props) => {
 };
 
 
-// --- MAIN CLARITY COMPONENT (MERGED App.tsx and index.html) ---
+// --- FRAMER CODE COMPONENT ---
 
-type InputMode = 'url' | 'file';
-
-export default function Bend() {
-  const [mediaSource, setMediaSource] = useState<string | File>('https://picsum.photos/seed/p1/1920/1080');
-  const [inputMode, setInputMode] = useState<InputMode>('url');
-  const [urlInput, setUrlInput] = useState('https://picsum.photos/seed/p1/1920/1080');
+export default function Bend(props) {
+  const { sourceType, mediaUrl, mediaFile, flow, lens, pinch, scale } = props;
   
-  const [flow, setFlow] = useState<number>(0.05);
-  const [lens, setLens] = useState<number>(0.1);
-  const [pinch, setPinch] = useState<number>(0);
-  const [scale, setScale] = useState<number>(1.0);
+  const mediaSource = sourceType === 'file' && mediaFile ? mediaFile : mediaUrl;
 
-  const handleUrlSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (urlInput) {
-      setMediaSource(urlInput);
-    }
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setMediaSource(e.target.files[0]);
-    }
-  };
-
-  const css = `
-      *, *::before, *::after {
-        box-sizing: border-box;
-        margin: 0;
-        padding: 0;
-      }
-      body {
-        font-family: 'Inter', sans-serif;
-        background-color: #F4F4F4;
-        color: #1a1a1a;
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-      }
-      input[type=range]::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        appearance: none;
-        width: 16px;
-        height: 16px;
-        background: #1a1a1a;
-        border-radius: 50%;
-        cursor: pointer;
-        margin-top: -6px;
-        transition: transform 0.2s ease;
-      }
-      input[type=range]::-webkit-slider-thumb:hover {
-        transform: scale(1.2);
-      }
-      input[type=range]::-moz-range-thumb {
-        width: 16px;
-        height: 16px;
-        background: #1a1a1a;
-        border-radius: 50%;
-        cursor: pointer;
-      }
-  `;
-
-  const importMap = {
-    imports: {
-      "react/": "https://aistudiocdn.com/react@^19.1.1/",
-      "react": "https://aistudiocdn.com/react@^19.1.1",
-      "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
-      "three": "https://unpkg.com/three@0.128.0/build/three.module.js"
-    }
-  };
-
-  // Note: Rendering an entire <html> document from a React component is unconventional
-  // and can lead to issues when mounting into a standard HTML file's <body>.
-  // This implementation strictly follows the request to merge index.html into the component.
   return (
-    <>
-      <head>
-        <meta charSet="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>WebGL Media Distortion</title>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet" />
-        <style dangerouslySetInnerHTML={{ __html: css }} />
-        {/* The importmap is included here for context but is loaded by the host index.html */}
-      </head>
-      <div style={styles.appContainer}>
-        <div style={styles.mainLayout}>
-          <div style={styles.controlsPanel}>
-            <h1 style={styles.title}>Bend Box</h1>
-            <p style={styles.description}>
-              An interactive media distortion component. Upload an image, video, or GIF, and manipulate it in real-time.
-            </p>
-
-            <div style={styles.mediaInputSection}>
-              <div style={styles.inputModeToggle}>
-                <button
-                  onClick={() => setInputMode('url')}
-                  style={inputMode === 'url' ? styles.activeToggle : styles.inactiveToggle}
-                  aria-pressed={inputMode === 'url'}
-                >
-                  URL
-                </button>
-                <button
-                  onClick={() => setInputMode('file')}
-                  style={inputMode === 'file' ? styles.activeToggle : styles.inactiveToggle}
-                  aria-pressed={inputMode === 'file'}
-                >
-                  Upload File
-                </button>
-              </div>
-              {inputMode === 'url' ? (
-                <form onSubmit={handleUrlSubmit} style={styles.urlForm}>
-                  <input
-                    type="text"
-                    value={urlInput}
-                    onChange={(e) => setUrlInput(e.target.value)}
-                    placeholder="Enter image/video/gif URL"
-                    style={styles.urlInput}
-                    aria-label="Media URL"
-                  />
-                  <button type="submit" style={styles.button}>Load</button>
-                </form>
-              ) : (
-                <div style={styles.fileInputContainer}>
-                  <input
-                    type="file"
-                    id="file-upload"
-                    onChange={handleFileChange}
-                    accept="image/*,video/*,.gif"
-                    style={styles.fileInput}
-                  />
-                   <label htmlFor="file-upload" style={styles.fileInputLabel}>
-                      Choose File
-                  </label>
-                </div>
-              )}
-            </div>
-            
-            <div style={styles.slidersWrapper}>
-              <div style={styles.sliderContainer}>
-                <label htmlFor="flow" style={styles.sliderLabel}>Flow Distortion</label>
-                <input id="flow" type="range" min="0" max="0.5" step="0.01" value={flow} onChange={(e) => setFlow(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Flow Distortion"/>
-              </div>
-              <div style={styles.sliderContainer}>
-                <label htmlFor="lens" style={styles.sliderLabel}>Lens Distortion</label>
-                <input id="lens" type="range" min="-1" max="1" step="0.01" value={lens} onChange={(e) => setLens(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Lens Distortion"/>
-              </div>
-              <div style={styles.sliderContainer}>
-                <label htmlFor="pinch" style={styles.sliderLabel}>Pinch / Vortex</label>
-                <input id="pinch" type="range" min="-1.5" max="1.5" step="0.01" value={pinch} onChange={(e) => setPinch(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Pinch Vortex"/>
-              </div>
-              <div style={styles.sliderContainer}>
-                <label htmlFor="scale" style={styles.sliderLabel}>Media Scale</label>
-                <input id="scale" type="range" min="0.5" max="1.5" step="0.01" value={scale} onChange={(e) => setScale(parseFloat(e.target.value))} style={styles.sliderInput} aria-label="Media Scale"/>
-              </div>
-            </div>
-
-          </div>
-          <div style={styles.canvasContainer}>
-            <BendBox 
-              mediaSource={mediaSource} 
-              flow={flow} 
-              lens={lens} 
-              pinch={pinch} 
-              scale={scale} 
-            />
-          </div>
-        </div>
-      </div>
-    </>
+    <div style={{ width: '100%', height: '100%', background: 'radial-gradient(circle, #E8E8E8 0%, #D8D8D8 100%)' }}>
+        <BendBox 
+            mediaSource={mediaSource} 
+            flow={flow} 
+            lens={lens} 
+            pinch={pinch} 
+            scale={scale} 
+        />
+    </div>
   );
+}
+
+Bend.defaultProps = {
+    width: 600,
+    height: 450,
+    sourceType: 'url',
+    mediaUrl: 'https://picsum.photos/seed/framer/1200/900',
+    flow: 0.05,
+    lens: 0.1,
+    pinch: 0,
+    scale: 1.0,
 };
 
-const styles: { [key: string]: React.CSSProperties } = {
-  appContainer: {
-    minHeight: '100vh',
-    backgroundColor: '#F4F4F4',
-    color: '#1a1a1a',
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: '2rem',
-  },
-  mainLayout: {
-    display: 'grid',
-    gridTemplateColumns: '320px 1fr',
-    gap: '2rem',
-    width: '100%',
-    maxWidth: '1200px',
-    minHeight: '70vh',
-    backgroundColor: '#FFFFFF',
-    borderRadius: '16px',
-    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.08)',
-    overflow: 'hidden',
-  },
-  controlsPanel: {
-    padding: '2rem',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '2rem',
-    borderRight: '1px solid #EAEAEA',
-  },
-  title: {
-    fontSize: '1.75rem',
-    fontWeight: 700,
-  },
-  description: {
-    fontSize: '0.9rem',
-    color: '#666666',
-    lineHeight: 1.5,
-  },
-  mediaInputSection: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '1rem',
-  },
-  inputModeToggle: {
-    display: 'flex',
-    width: '100%',
-    backgroundColor: '#EEEEEE',
-    borderRadius: '8px',
-    padding: '4px',
-  },
-  activeToggle: {
-    flex: 1,
-    padding: '0.5rem',
-    border: 'none',
-    borderRadius: '6px',
-    backgroundColor: '#FFFFFF',
-    color: '#1a1a1a',
-    fontWeight: 500,
-    cursor: 'pointer',
-    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-    transition: 'all 0.2s ease',
-  },
-  inactiveToggle: {
-    flex: 1,
-    padding: '0.5rem',
-    border: 'none',
-    borderRadius: '6px',
-    backgroundColor: 'transparent',
-    color: '#666666',
-    fontWeight: 500,
-    cursor: 'pointer',
-    transition: 'all 0.2s ease',
-  },
-  urlForm: {
-    display: 'flex',
-    gap: '0.5rem',
-  },
-  urlInput: {
-    flex: 1,
-    padding: '0.5rem 0.75rem',
-    border: '1px solid #DDDDDD',
-    borderRadius: '6px',
-    fontSize: '0.875rem',
-    outline: 'none',
-  },
-  fileInputContainer: {
-    position: 'relative',
-  },
-  fileInput: {
-    display: 'none',
-  },
-  fileInputLabel: {
-    display: 'block',
-    padding: '0.5rem 1rem',
-    backgroundColor: '#1a1a1a',
-    color: '#FFFFFF',
-    borderRadius: '6px',
-    textAlign: 'center',
-    cursor: 'pointer',
-    transition: 'background-color 0.2s ease',
-  },
-  button: {
-    padding: '0.5rem 1rem',
-    border: 'none',
-    borderRadius: '6px',
-    backgroundColor: '#1a1a1a',
-    color: '#FFFFFF',
-    fontWeight: 500,
-    cursor: 'pointer',
-    transition: 'background-color 0.2s ease',
-  },
-  slidersWrapper: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '1.5rem',
-  },
-  sliderContainer: {
-    width: '100%',
-  },
-  sliderLabel: {
-    display: 'block',
-    fontSize: '0.875rem',
-    fontWeight: 500,
-    color: '#333333',
-    marginBottom: '0.75rem',
-  },
-  sliderInput: {
-    width: '100%',
-    height: '4px',
-    backgroundColor: '#DDDDDD',
-    borderRadius: '9999px',
-    appearance: 'none',
-    cursor: 'pointer',
-    outline: 'none',
-  },
-  canvasContainer: {
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: '100%',
-    height: '100%',
-    minHeight: '400px',
-    background: 'radial-gradient(circle, #E8E8E8 0%, #D8D8D8 100%)'
-  },
-};
+addPropertyControls(Bend, {
+    sourceType: {
+        type: ControlType.SegmentedEnum,
+        title: "Source",
+        options: ["url", "file"],
+        optionTitles: ["URL", "File"],
+    },
+    mediaUrl: {
+        type: ControlType.String,
+        title: "Media URL",
+        placeholder: "https://...",
+        hidden: (props) => props.sourceType === 'file',
+    },
+    mediaFile: {
+        type: ControlType.File,
+        title: "Upload",
+        allowedFileTypes: ["jpg", "jpeg", "png", "gif", "mp4", "webm"],
+        hidden: (props) => props.sourceType === 'url',
+    },
+    flow: {
+        type: ControlType.Number,
+        title: "Flow",
+        min: 0,
+        max: 0.5,
+        step: 0.01,
+        displayStepper: true,
+    },
+    lens: {
+        type: ControlType.Number,
+        title: "Lens",
+        min: -1,
+        max: 1,
+        step: 0.01,
+        displayStepper: true,
+    },
+    pinch: {
+        type: ControlType.Number,
+        title: "Pinch",
+        min: -1.5,
+        max: 1.5,
+        step: 0.01,
+        displayStepper: true,
+    },
+    scale: {
+        type: ControlType.Number,
+        title: "Scale",
+        min: 0.5,
+        max: 1.5,
+        step: 0.01,
+        displayStepper: true,
+    },
+});
